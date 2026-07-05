@@ -17,9 +17,9 @@ export type ComparisonOperator =
 
 export type OrderDirection = 'asc' | 'desc';
 
-export interface ColumnExpression {
+export interface ColumnExpression<Name extends string = string> {
   readonly kind: 'column';
-  readonly name: string;
+  readonly name: Name;
 }
 
 export interface ParameterExpression<T = unknown> {
@@ -76,10 +76,10 @@ export interface Assignment {
   readonly value: Expression;
 }
 
-export function column(name: string): ColumnExpression {
+export function column<Name extends string>(name: Name): ColumnExpression<Name> {
   return freezeObject({
     kind: 'column',
-    name: assertNonEmptyString(name, 'column name'),
+    name: assertNonEmptyString(name, 'column name') as Name,
   });
 }
 
