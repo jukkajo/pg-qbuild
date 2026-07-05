@@ -27,6 +27,7 @@ import type {
   ColumnName,
   InsertRowInput,
   NonEmptyTuple,
+  QueryKind,
   SchemaDefinition,
   TableName,
   TableRow,
@@ -66,7 +67,13 @@ type UpdateValue<
 > = InsertRowInput<Schema, Table> | Assignment | readonly Assignment[];
 
 interface BuilderContext {
-  readonly executor: QueryExecutor;
+  readonly execute: (kind: QueryKind, compiled: CompiledQuery) => Promise<QueryRows>;
+}
+
+interface RowsExecutionMethods<Row> {
+  execute(): Promise<readonly Row[]>;
+  executeTakeFirst(): Promise<Row | undefined>;
+  executeTakeFirstOrThrow(): Promise<Row>;
 }
 
 export type SelectStartBuilder<
@@ -78,7 +85,7 @@ export interface SelectQueryBuilder<
   Schema extends SchemaDefinition,
   Table extends TableName<Schema>,
   Columns extends readonly SelectableColumn<Schema, Table>[],
-> {
+> extends RowsExecutionMethods<SelectedRow<Schema, Table, Columns>> {
   select<NewColumns extends NonEmptyTuple<SelectableColumn<Schema, Table>>>(
     ...columns: NewColumns
   ): SelectQueryBuilder<Schema, Table, [...Columns, ...NewColumns]>;
@@ -89,7 +96,6 @@ export interface SelectQueryBuilder<
   limit(limit: number): SelectQueryBuilder<Schema, Table, Columns>;
   offset(offset: number): SelectQueryBuilder<Schema, Table, Columns>;
   compile(): CompiledQuery;
-  execute(): Promise<readonly SelectedRow<Schema, Table, Columns>[]>;
 }
 
 export type InsertStartBuilder<
@@ -101,7 +107,7 @@ export interface InsertValuesBuilder<
   Schema extends SchemaDefinition,
   Table extends TableName<Schema>,
   Rows extends readonly InsertRowValue<Schema, Table>[],
-> {
+> extends RowsExecutionMethods<QueryRows[number]> {
   values<NewRows extends NonEmptyTuple<InsertRowValue<Schema, Table>>>(
     ...rows: NewRows
   ): InsertValuesBuilder<Schema, Table, [...Rows, ...NewRows]>;
@@ -109,7 +115,6 @@ export interface InsertValuesBuilder<
     ...columns: Columns
   ): InsertValuesBuilder<Schema, Table, Rows>;
   compile(): CompiledQuery;
-  execute(): Promise<QueryRows>;
 }
 
 export type UpdateStartBuilder<
@@ -121,7 +126,7 @@ export interface UpdateValuesBuilder<
   Schema extends SchemaDefinition,
   Table extends TableName<Schema>,
   Assignments extends readonly UpdateValue<Schema, Table>[],
-> {
+> extends RowsExecutionMethods<QueryRows[number]> {
   set<NewAssignments extends NonEmptyTuple<UpdateValue<Schema, Table>>>(
     ...values: NewAssignments
   ): UpdateValuesBuilder<Schema, Table, [...Assignments, ...NewAssignments]>;
@@ -130,19 +135,17 @@ export interface UpdateValuesBuilder<
     ...columns: Columns
   ): UpdateValuesBuilder<Schema, Table, Assignments>;
   compile(): CompiledQuery;
-  execute(): Promise<QueryRows>;
 }
 
 export interface DeleteBuilder<
   Schema extends SchemaDefinition,
   Table extends TableName<Schema>,
-> {
+> extends RowsExecutionMethods<QueryRows[number]> {
   where(predicate: Predicate): DeleteBuilder<Schema, Table>;
   returning<Columns extends NonEmptyTuple<SelectableColumn<Schema, Table>>>(
     ...columns: Columns
   ): DeleteBuilder<Schema, Table>;
   compile(): CompiledQuery;
-  execute(): Promise<QueryRows>;
 }
 
 export function createSelectStartBuilder<
@@ -242,7 +245,7 @@ function createSelectQueryBuilder<
 ): SelectQueryBuilder<Schema, Table, Columns> {
   const compile = (): CompiledQuery => {
     if (state.selectedColumns.length === 0) {
-      throw new TypeError('selected columns must contain at least one item');
+      throw new TypeError('selected columns must contain at least one item before compile()');
     }
 
     return compileQuery(
@@ -258,13 +261,15 @@ function createSelectQueryBuilder<
   };
 
   const execute = async (): Promise<readonly SelectedRow<Schema, Table, Columns>[]> =>
-    (await context.executor.query(compile())) as readonly SelectedRow<
+    (await context.execute('select', compile())) as readonly SelectedRow<
       Schema,
       Table,
       Columns
     >[];
+  const rowsExecution = createRowsExecutionMethods(execute, 'select');
 
   return freezeObject({
+    ...rowsExecution,
     select<NewColumns extends NonEmptyTuple<SelectableColumn<Schema, Table>>>(
       ...columns: NewColumns
     ): SelectQueryBuilder<Schema, Table, NewColumns> {
@@ -298,7 +303,6 @@ function createSelectQueryBuilder<
       return createSelectQueryBuilder(context, { ...state, offset });
     },
     compile,
-    execute,
   });
 }
 
@@ -312,7 +316,7 @@ function createInsertValuesBuilder<
 ): InsertValuesBuilder<Schema, Table, Rows> {
   const compile = (): CompiledQuery => {
     if (state.rows.length === 0) {
-      throw new TypeError('insert rows must contain at least one item');
+      throw new TypeError('insert rows must contain at least one item before compile()');
     }
 
     return compileQuery(
@@ -326,9 +330,11 @@ function createInsertValuesBuilder<
     );
   };
 
-  const execute = async (): Promise<QueryRows> => context.executor.query(compile());
+  const execute = async (): Promise<QueryRows> => context.execute('insert', compile());
+  const rowsExecution = createRowsExecutionMethods(execute, 'insert');
 
   return freezeObject({
+    ...rowsExecution,
     values<NewRows extends NonEmptyTuple<InsertRowValue<Schema, Table>>>(
       ...rows: NewRows
     ): InsertValuesBuilder<Schema, Table, NewRows> {
@@ -347,7 +353,6 @@ function createInsertValuesBuilder<
       });
     },
     compile,
-    execute,
   });
 }
 
@@ -361,7 +366,7 @@ function createUpdateValuesBuilder<
 ): UpdateValuesBuilder<Schema, Table, Assignments> {
   const compile = (): CompiledQuery => {
     if (state.assignments.length === 0) {
-      throw new TypeError('update assignments must contain at least one item');
+      throw new TypeError('update assignments must contain at least one item before compile()');
     }
 
     return compileQuery(
@@ -376,9 +381,11 @@ function createUpdateValuesBuilder<
     );
   };
 
-  const execute = async (): Promise<QueryRows> => context.executor.query(compile());
+  const execute = async (): Promise<QueryRows> => context.execute('update', compile());
+  const rowsExecution = createRowsExecutionMethods(execute, 'update');
 
   return freezeObject({
+    ...rowsExecution,
     set<NewAssignments extends NonEmptyTuple<UpdateValue<Schema, Table>>>(
       ...values: NewAssignments
     ): UpdateValuesBuilder<Schema, Table, NewAssignments> {
@@ -403,7 +410,6 @@ function createUpdateValuesBuilder<
       });
     },
     compile,
-    execute,
   });
 }
 
@@ -425,9 +431,11 @@ function createDeleteQueryBuilder<
       }),
     );
 
-  const execute = async (): Promise<QueryRows> => context.executor.query(compile());
+  const execute = async (): Promise<QueryRows> => context.execute('delete', compile());
+  const rowsExecution = createRowsExecutionMethods(execute, 'delete');
 
   return freezeObject({
+    ...rowsExecution,
     where(predicate: Predicate): DeleteBuilder<Schema, Table> {
       return createDeleteQueryBuilder(context, {
         ...state,
@@ -443,7 +451,27 @@ function createDeleteQueryBuilder<
       });
     },
     compile,
+  });
+}
+
+function createRowsExecutionMethods<Row>(
+  execute: () => Promise<readonly Row[]>,
+  kind: QueryKind,
+): RowsExecutionMethods<Row> {
+  const executeTakeFirst = async (): Promise<Row | undefined> => (await execute())[0];
+  const executeTakeFirstOrThrow = async (): Promise<Row> => {
+    const row = await executeTakeFirst();
+    if (row === undefined) {
+      throw new Error(`${kind} query returned no rows`);
+    }
+
+    return row;
+  };
+
+  return freezeObject({
     execute,
+    executeTakeFirst,
+    executeTakeFirstOrThrow,
   });
 }
 
@@ -653,7 +681,7 @@ function isExpression(value: unknown): value is Expression {
 }
 
 export function createDatabase<
-  Schema extends SchemaDefinition,
+  Schema extends SchemaDefinition = Record<string, Record<string, unknown>>,
 >(
   executor?: QueryExecutor & {
     readonly transaction?: <T>(
@@ -679,27 +707,32 @@ export function createDatabase<
 } {
   const fallbackExecutor = createUnavailableExecutor();
   const contextExecutor = executor ?? fallbackExecutor;
+  const context: BuilderContext = {
+    execute(_kind, compiled) {
+      return contextExecutor.query(compiled);
+    },
+  };
 
   return freezeObject({
     selectFrom<Table extends TableName<Schema>>(
       table: Table,
     ): SelectStartBuilder<Schema, Table> {
-      return createSelectStartBuilder({ executor: contextExecutor }, table);
+      return createSelectStartBuilder(context, table);
     },
     insertInto<Table extends TableName<Schema>>(
       table: Table,
     ): InsertStartBuilder<Schema, Table> {
-      return createInsertStartBuilder({ executor: contextExecutor }, table);
+      return createInsertStartBuilder(context, table);
     },
     updateTable<Table extends TableName<Schema>>(
       table: Table,
     ): UpdateStartBuilder<Schema, Table> {
-      return createUpdateStartBuilder({ executor: contextExecutor }, table);
+      return createUpdateStartBuilder(context, table);
     },
     deleteFrom<Table extends TableName<Schema>>(
       table: Table,
     ): DeleteBuilder<Schema, Table> {
-      return createDeleteBuilder({ executor: contextExecutor }, table);
+      return createDeleteBuilder(context, table);
     },
     async transaction<T>(
       callback: (db: ReturnType<typeof createDatabase<Schema>>) => Promise<T> | T,

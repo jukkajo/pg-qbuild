@@ -100,9 +100,59 @@ assertCompile(
   selectQuery({
     sourceTable: 'users',
     selectedColumns: [column('id')],
+    predicates: [comparison(column('login_count'), 'greaterThan', parameter(10))],
+  }),
+  'SELECT "id" FROM "users" WHERE "login_count" > $1',
+  [10],
+);
+
+assertCompile(
+  selectQuery({
+    sourceTable: 'users',
+    selectedColumns: [column('id')],
+    predicates: [comparison(column('login_count'), 'greaterThanOrEqual', parameter(10))],
+  }),
+  'SELECT "id" FROM "users" WHERE "login_count" >= $1',
+  [10],
+);
+
+assertCompile(
+  selectQuery({
+    sourceTable: 'users',
+    selectedColumns: [column('id')],
+    predicates: [comparison(column('login_count'), 'lessThan', parameter(10))],
+  }),
+  'SELECT "id" FROM "users" WHERE "login_count" < $1',
+  [10],
+);
+
+assertCompile(
+  selectQuery({
+    sourceTable: 'users',
+    selectedColumns: [column('id')],
+    predicates: [comparison(column('login_count'), 'lessThanOrEqual', parameter(10))],
+  }),
+  'SELECT "id" FROM "users" WHERE "login_count" <= $1',
+  [10],
+);
+
+assertCompile(
+  selectQuery({
+    sourceTable: 'users',
+    selectedColumns: [column('id')],
     predicates: [nullCheck(column('deleted_at'))],
   }),
   'SELECT "id" FROM "users" WHERE "deleted_at" IS NULL',
+  [],
+);
+
+assertCompile(
+  selectQuery({
+    sourceTable: 'users',
+    selectedColumns: [column('id')],
+    predicates: [nullCheck(column('deleted_at'), true)],
+  }),
+  'SELECT "id" FROM "users" WHERE "deleted_at" IS NOT NULL',
   [],
 );
 

@@ -75,6 +75,124 @@ async function main(): Promise<void> {
     });
 
     await withSeededTable(db, async () => {
+      const firstRow = await db
+        .selectFrom(TABLE)
+        .select('id', 'email')
+        .orderBy(orderItem(column('id'), 'asc'))
+        .executeTakeFirst();
+
+      assertEqual(
+        firstRow,
+        { id: 1, email: 'ada@example.com' },
+        'executeTakeFirst should return the first row',
+      );
+
+      const missingRow = await db
+        .selectFrom(TABLE)
+        .select('id')
+        .where(comparison(column('email'), 'equals', parameter('missing@example.com')))
+        .executeTakeFirst();
+
+      assert(
+        missingRow === undefined,
+        'executeTakeFirst should resolve undefined when no rows match',
+      );
+
+      const firstOrThrow = await db
+        .selectFrom(TABLE)
+        .select('id')
+        .orderBy(orderItem(column('id'), 'asc'))
+        .executeTakeFirstOrThrow();
+
+      assertEqual(
+        firstOrThrow,
+        { id: 1 },
+        'executeTakeFirstOrThrow should return the first row',
+      );
+
+      await assertRejects(
+        () =>
+          db.selectFrom(TABLE)
+            .select('id')
+            .where(comparison(column('email'), 'equals', parameter('missing@example.com')))
+            .executeTakeFirstOrThrow(),
+        'query returned no rows',
+      );
+    });
+
+    await withSeededTable(db, async () => {
+      const events: Array<{
+        readonly phase: 'before' | 'success' | 'failure';
+        readonly kind: string;
+        readonly sql: string;
+        readonly durationMs?: number;
+      }> = [];
+
+      const hookedDb = createDb<TestSchema>(driver, {
+        hooks: {
+          beforeExecute(event) {
+            events.push({
+              phase: 'before',
+              kind: event.kind,
+              sql: event.sql,
+            });
+          },
+          afterSuccess(event) {
+            events.push({
+              phase: 'success',
+              kind: event.kind,
+              sql: event.sql,
+              durationMs: event.durationMs,
+            });
+          },
+          afterFailure(event) {
+            events.push({
+              phase: 'failure',
+              kind: event.kind,
+              sql: event.sql,
+              durationMs: event.durationMs,
+            });
+          },
+        },
+      });
+
+      await hookedDb
+        .selectFrom(TABLE)
+        .select('email')
+        .orderBy(orderItem(column('id'), 'asc'))
+        .execute();
+
+      await assertRejects(
+        () =>
+          hookedDb.insertInto(TABLE).values({
+            email: 'ada@example.com',
+            name: 'Duplicate',
+            status: 'active',
+            archived: false,
+          }).execute(),
+        'PostgreSQL query failed',
+      );
+
+      assertEqual(
+        events.map((event) => `${event.phase}:${event.kind}`),
+        ['before:select', 'success:select', 'before:insert', 'failure:insert'],
+        'hooks should observe query lifecycle events',
+      );
+      assert(
+        typeof events[0]?.sql === 'string' && events[0]!.sql.includes('SELECT'),
+        'beforeExecute should include SQL text',
+      );
+      assert(
+        typeof events[1]?.durationMs === 'number',
+        'afterSuccess should include duration',
+      );
+      assert(
+        typeof events[3]?.durationMs === 'number',
+        'afterFailure should include duration',
+      );
+    });
+
+    await withSeededTable(db, async () => {
       await db.insertInto(TABLE).values({
         email: 'cara@example.com',
         name: 'Cara',

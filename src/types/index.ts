@@ -33,3 +33,26 @@ export type UpdateRowInput<
   Schema extends SchemaDefinition,
   Table extends TableName<Schema>,
 > = Partial<TableRow<Schema, Table>>;
+
+export type QueryKind = 'select' | 'insert' | 'update' | 'delete';
+
+export interface QueryExecutionEvent {
+  readonly kind: QueryKind;
+  readonly sql: string;
+  readonly params: readonly unknown[];
+}
+
+export interface QueryExecutionSuccessEvent extends QueryExecutionEvent {
+  readonly durationMs: number;
+}
+
+export interface QueryExecutionFailureEvent extends QueryExecutionEvent {
+  readonly durationMs: number;
+  readonly error: unknown;
+}
+
+export interface QueryExecutionHooks {
+  readonly beforeExecute?: (event: QueryExecutionEvent) => void | Promise<void>;
+  readonly afterSuccess?: (event: QueryExecutionSuccessEvent) => void | Promise<void>;
+  readonly afterFailure?: (event: QueryExecutionFailureEvent) => void | Promise<void>;
+}
