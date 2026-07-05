@@ -2,4 +2,4 @@
 
 PostgreSQL-specific quoting and rendering conventions live here.
 
-This is a future seam, not a multi-dialect system.
+The current surface is intentionally tiny and Postgres-only.

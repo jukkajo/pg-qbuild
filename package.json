@@ -12,7 +12,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "typecheck:test": "tsc -p test/tsconfig.json --noEmit",
-    "test": "tsc -p test/tsconfig.json && node dist-test/test/core/query-model.test.js"
+    "test": "tsc -p test/tsconfig.json && find dist-test/test -name '*.test.js' -print0 | xargs -0 -r node --test"
   },
   "keywords": [
     "typescript",

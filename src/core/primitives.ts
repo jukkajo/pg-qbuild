@@ -11,7 +11,9 @@ export type ComparisonOperator =
   | 'lessThan'
   | 'lessThanOrEqual'
   | 'greaterThan'
-  | 'greaterThanOrEqual';
+  | 'greaterThanOrEqual'
+  | 'like'
+  | 'ilike';
 
 export type OrderDirection = 'asc' | 'desc';
 
@@ -171,6 +173,8 @@ function assertComparisonOperator(
     case 'lessThanOrEqual':
     case 'greaterThan':
     case 'greaterThanOrEqual':
+    case 'like':
+    case 'ilike':
       return operator;
     default:
       throw new TypeError(`invalid comparison operator: ${String(operator)}`);
