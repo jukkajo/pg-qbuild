@@ -1,0 +1,28 @@
+{
+  "name": "pg-qbuild",
+  "version": "0.0.1",
+  "private": true,
+  "description": "A small SQL-first TypeScript query builder for PostgreSQL.",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "echo \"tests not added yet\""
+  },
+  "keywords": [
+    "typescript",
+    "postgres",
+    "sql",
+    "query-builder"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3"
+  }
+}
