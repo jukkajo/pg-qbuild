@@ -2,6 +2,8 @@ import {
   assertNonEmptyArray,
   assertNonNegativeInteger,
   assertUniqueColumns,
+  freezeArray,
+  freezeObject,
 } from '../core/invariants.js';
 import type {
   Assignment,
@@ -21,8 +23,8 @@ import type {
 import { quoteIdentifier } from '../dialect/index.js';
 
 export interface CompiledQuery {
-  sql: string;
-  params: unknown[];
+  readonly sql: string;
+  readonly params: readonly unknown[];
 }
 
 interface RenderState {
@@ -35,10 +37,10 @@ export function compileQuery(query: Query): CompiledQuery {
   const state: RenderState = { params: [] };
   const sql = renderQuery(query, state);
 
-  return {
+  return freezeObject({
     sql,
-    params: state.params.slice(),
-  };
+    params: freezeArray(state.params),
+  });
 }
 
 function renderQuery(query: Query, state: RenderState): string {

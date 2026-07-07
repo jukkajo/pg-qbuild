@@ -17,6 +17,7 @@ import type {
   SchemaDefinition,
   TableName,
 } from '../types/index.js';
+import { normalizeCompiledQueryInput } from './query-input.js';
 
 interface DatabaseContext {
   readonly execute: (kind: QueryKind, compiled: CompiledQuery) => Promise<QueryRows>;
@@ -29,6 +30,8 @@ interface DatabaseOptions {
 export interface DatabaseFacade<
   Schema extends SchemaDefinition = Record<string, Record<string, unknown>>,
 > {
+  execute(compiled: CompiledQuery): Promise<QueryRows>;
+  execute(sql: string, params?: readonly unknown[]): Promise<QueryRows>;
   selectFrom<Table extends TableName<Schema>>(
     table: Table,
   ): SelectStartBuilder<Schema, Table>;
@@ -61,6 +64,12 @@ export function createDb<
   };
 
   return freezeObject({
+    execute(
+      compiledOrSql: CompiledQuery | string,
+      params?: readonly unknown[],
+    ): Promise<QueryRows> {
+      return context.execute('raw', normalizeCompiledQueryInput(compiledOrSql, params));
+    },
     selectFrom<Table extends TableName<Schema>>(
       table: Table,
     ): SelectStartBuilder<Schema, Table> {

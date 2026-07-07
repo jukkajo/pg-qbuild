@@ -34,7 +34,7 @@ export type UpdateRowInput<
   Table extends TableName<Schema>,
 > = Partial<TableRow<Schema, Table>>;
 
-export type QueryKind = 'select' | 'insert' | 'update' | 'delete';
+export type QueryKind = 'select' | 'insert' | 'update' | 'delete' | 'raw';
 
 export interface QueryExecutionEvent {
   readonly kind: QueryKind;

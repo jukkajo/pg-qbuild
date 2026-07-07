@@ -22,7 +22,7 @@ interface Schema {
 const db = createDb<Schema>(createPostgresDriver(), {
   hooks: {
     beforeExecute(event) {
-      const kind: 'select' | 'insert' | 'update' | 'delete' = event.kind;
+      const kind: 'select' | 'insert' | 'update' | 'delete' | 'raw' = event.kind;
       const sql: string = event.sql;
       const params: readonly unknown[] = event.params;
 
@@ -49,6 +49,9 @@ db.selectFrom('posts');
 db.insertInto('users');
 db.updateTable('users');
 db.deleteFrom('posts');
+db.execute('SELECT 1');
+db.execute('SELECT $1 AS value', [1]);
+db.execute({ sql: 'SELECT $1 AS value', params: [1] });
 
 const selectRowsPromise = db
   .selectFrom('users')
@@ -78,6 +81,12 @@ const firstUserOrThrow: FirstUserOrThrow = {
   email: 'ada@example.com',
 };
 
+const rawRowsPromise = db.execute('SELECT $1 AS value', [1]);
+type RawRows = Awaited<typeof rawRowsPromise>;
+const rawRow: RawRows[number] = {
+  value: 1,
+};
+
 db.insertInto('users').values({
   email: 'ada@example.com',
   name: 'Ada',
@@ -89,6 +98,7 @@ db.updateTable('users').set({
 });
 
 const txRowsPromise = db.transaction(async (tx) => {
+  await tx.execute('SELECT $1::boolean AS ok', [true]);
   return await tx
     .selectFrom('posts')
     .select('id', 'title')
@@ -104,6 +114,7 @@ const txRow: TxRows[number] = {
 void selectRow;
 void firstUser;
 void firstUserOrThrow;
+void rawRow;
 void txRow;
 
 // @ts-expect-error unknown table should fail

@@ -18,6 +18,7 @@ interface TestSchema {
 }
 
 const TABLE = 'pg_qbuild_users' as const;
+const PARAM_TABLE = 'pg_qbuild_params' as const;
 
 const BASE_ROWS = [
   {
@@ -71,6 +72,33 @@ async function main(): Promise<void> {
         activeRows,
         [{ id: 1, email: 'ada@example.com' }],
         'where filters should restrict select results',
+      );
+    });
+
+    await withSeededTable(db, async () => {
+      const rawRows = await db.execute(
+        `SELECT "id", "email" FROM "${TABLE}" WHERE "status" = $1 ORDER BY "id" ASC`,
+        ['active'],
+      );
+
+      assertEqual(
+        rawRows,
+        [{ id: 1, email: 'ada@example.com' }],
+        'execute should support raw SQL with bound params',
+      );
+
+      const compiled = db
+        .selectFrom(TABLE)
+        .select('email')
+        .where(comparison(column('status'), 'equals', parameter('inactive')))
+        .compile();
+
+      const compiledRows = await db.execute(compiled);
+
+      assertEqual(
+        compiledRows,
+        [{ email: 'bea@example.com' }],
+        'execute should accept precompiled query objects',
       );
     });
 
@@ -156,6 +184,8 @@ async function main(): Promise<void> {
         },
       });
 
+      await hookedDb.execute('SELECT $1::text AS email', ['hooked@example.com']);
+
       await hookedDb
         .selectFrom(TABLE)
         .select('email')
@@ -175,7 +205,14 @@ async function main(): Promise<void> {
 
       assertEqual(
         events.map((event) => `${event.phase}:${event.kind}`),
-        ['before:select', 'success:select', 'before:insert', 'failure:insert'],
+        [
+          'before:raw',
+          'success:raw',
+          'before:select',
+          'success:select',
+          'before:insert',
+          'failure:insert',
+        ],
         'hooks should observe query lifecycle events',
       );
       assert(
@@ -187,7 +224,7 @@ async function main(): Promise<void> {
         'afterSuccess should include duration',
       );
       assert(
-        typeof events[3]?.durationMs === 'number',
+        typeof events[5]?.durationMs === 'number',
         'afterFailure should include duration',
       );
     });
@@ -392,6 +429,172 @@ async function main(): Promise<void> {
     });
 
     await withSeededTable(db, async () => {
+      await db.transaction(async (tx) => {
+        await tx.execute(
+          `INSERT INTO "${TABLE}" ("email", "name", "status", "archived") VALUES ($1, $2, $3, $4)`,
+          ['cara@example.com', 'Cara', 'active', false],
+        );
+
+        await tx.execute(
+          `UPDATE "${TABLE}" SET "status" = $1 WHERE "email" = $2`,
+          ['suspended', 'ada@example.com'],
+        );
+      });
+
+      const rows = await db
+        .selectFrom(TABLE)
+        .select('email', 'status')
+        .orderBy(orderItem(column('id'), 'asc'))
+        .execute();
+
+      assertEqual(
+        rows,
+        [
+          { email: 'ada@example.com', status: 'suspended' },
+          { email: 'bea@example.com', status: 'inactive' },
+          { email: 'cara@example.com', status: 'active' },
+        ],
+        'raw execute inside a transaction should commit changes',
+      );
+    });
+
+    await withSeededTable(db, async () => {
+      try {
+        await db.transaction(async (tx) => {
+          await tx.execute(
+            `INSERT INTO "${TABLE}" ("email", "name", "status", "archived") VALUES ($1, $2, $3, $4)`,
+            ['rollback-raw@example.com', 'Rollback Raw', 'active', false],
+          );
+
+          throw new Error('force raw rollback');
+        });
+      } catch (error) {
+        assert(
+          error instanceof Error && error.message === 'force raw rollback',
+          'raw transaction should rethrow the callback error',
+        );
+      }
+
+      const rows = await db
+        .selectFrom(TABLE)
+        .select('email')
+        .orderBy(orderItem(column('id'), 'asc'))
+        .execute();
+
+      assertEqual(
+        rows,
+        [{ email: 'ada@example.com' }, { email: 'bea@example.com' }],
+        'raw execute inside a transaction should roll back inserted rows',
+      );
+    });
+
+    await resetParamsTable(db);
+
+    const dangerousTextValues = [
+      `quote ' single`,
+      `semicolon; SELECT now();`,
+      `comment -- not SQL /* still text */`,
+      String.raw`backslash \\ path`,
+      'unicode: ää ☃ 東京',
+    ];
+
+    for (const value of dangerousTextValues) {
+      await db.execute(
+        `INSERT INTO "${PARAM_TABLE}" (payload_text) VALUES ($1)`,
+        [value],
+      );
+    }
+
+    const timestamp = new Date('2024-02-03T04:05:06.789Z');
+    const arrayPayload = [
+      `quote " inside`,
+      `semicolon; -- text`,
+      String.raw`slash \\ value`,
+      'unicode äö ☃',
+    ];
+    const jsonPayload = {
+      name: `O'Reilly`,
+      nested: { enabled: true },
+      tags: ['sql', 'json'],
+    };
+
+    await db.execute(
+      `
+        INSERT INTO "${PARAM_TABLE}" (
+          payload_nullable_text,
+          payload_bool,
+          payload_integer,
+          payload_numeric,
+          payload_ts,
+          payload_text_array,
+          payload_json
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `,
+      [null, false, 42, 12.5, timestamp, arrayPayload, jsonPayload],
+    );
+
+    await db.execute(
+      `INSERT INTO "${PARAM_TABLE}" (payload_text_array) VALUES ($1)`,
+      [[]],
+    );
+
+    const textRows = await db.execute(
+      `SELECT payload_text FROM "${PARAM_TABLE}" WHERE payload_text IS NOT NULL ORDER BY id ASC`,
+    );
+
+    assertEqual(
+      textRows,
+      dangerousTextValues.map((payload_text) => ({ payload_text })),
+      'protocol-bound text parameters should preserve dangerous string content literally',
+    );
+
+    const typedRows = await db.execute(
+      `
+        SELECT
+          payload_nullable_text,
+          payload_bool,
+          payload_integer,
+          payload_numeric,
+          EXTRACT(EPOCH FROM payload_ts) AS payload_ts_epoch,
+          array_to_json(payload_text_array) AS payload_text_array,
+          payload_json
+        FROM "${PARAM_TABLE}"
+        WHERE payload_json IS NOT NULL
+      `,
+    );
+
+    assertEqual(
+      typedRows,
+      [{
+        payload_nullable_text: null,
+        payload_bool: false,
+        payload_integer: 42,
+        payload_numeric: 12.5,
+        payload_ts_epoch: timestamp.getTime() / 1000,
+        payload_text_array: arrayPayload,
+        payload_json: jsonPayload,
+      }],
+      'protocol-bound params should round-trip null, booleans, numbers, dates, arrays, and JSON',
+    );
+
+    const emptyArrayRows = await db.execute(
+      `
+        SELECT array_to_json(payload_text_array) AS payload_text_array
+        FROM "${PARAM_TABLE}"
+        WHERE payload_json IS NULL
+          AND payload_ts IS NULL
+          AND payload_text_array IS NOT NULL
+        ORDER BY id ASC
+      `,
+    );
+
+    assertEqual(
+      emptyArrayRows,
+      [{ payload_text_array: [] }],
+      'empty array parameters should work when PostgreSQL can infer the target array type',
+    );
+
+    await withSeededTable(db, async () => {
       await assertRejects(
         () =>
           db.insertInto(TABLE).values({
@@ -468,6 +671,11 @@ function readEnv(name: string): string | undefined {
 
 async function prepareSchema(driver: ReturnType<typeof createPostgresDriver>): Promise<void> {
   await driver.query({
+    sql: `DROP TABLE IF EXISTS "${PARAM_TABLE}"`,
+    params: [],
+  });
+
+  await driver.query({
     sql: `DROP TABLE IF EXISTS "${TABLE}"`,
     params: [],
   });
@@ -484,9 +692,31 @@ async function prepareSchema(driver: ReturnType<typeof createPostgresDriver>): P
     `,
     params: [],
   });
+
+  await driver.query({
+    sql: `
+      CREATE TABLE "${PARAM_TABLE}" (
+        id SERIAL PRIMARY KEY,
+        payload_text TEXT,
+        payload_nullable_text TEXT,
+        payload_bool BOOLEAN,
+        payload_integer INTEGER,
+        payload_numeric DOUBLE PRECISION,
+        payload_ts TIMESTAMPTZ,
+        payload_text_array TEXT[],
+        payload_json JSONB
+      )
+    `,
+    params: [],
+  });
 }
 
 async function teardownSchema(driver: ReturnType<typeof createPostgresDriver>): Promise<void> {
+  await driver.query({
+    sql: `DROP TABLE IF EXISTS "${PARAM_TABLE}"`,
+    params: [],
+  });
+
   await driver.query({
     sql: `DROP TABLE IF EXISTS "${TABLE}"`,
     params: [],
@@ -502,6 +732,12 @@ async function withSeededTable(
   await db.insertInto(TABLE).values(...BASE_ROWS).execute();
 
   await callback();
+}
+
+async function resetParamsTable(
+  db: DatabaseFacade<TestSchema>,
+): Promise<void> {
+  await db.execute(`TRUNCATE TABLE "${PARAM_TABLE}" RESTART IDENTITY`);
 }
 
 function assert(condition: unknown, message: string): asserts condition {
