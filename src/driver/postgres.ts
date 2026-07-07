@@ -125,9 +125,7 @@ class PostgresClient implements PostgresExecutor {
 
   private async executeCompiled(compiled: CompiledQuery): Promise<QueryRows> {
     await this.ensureConnected();
-
-    const sql = substituteParams(compiled.sql, compiled.params);
-    return await this.sendQuery(sql, compiled);
+    return await this.sendQuery(compiled);
   }
 
   private async runTransaction<T>(
@@ -186,17 +184,19 @@ class PostgresClient implements PostgresExecutor {
   }
 
   private async sendSimpleCommand(sql: string): Promise<QueryRows> {
-    return await this.sendQuery(sql, { sql, params: [] });
+    return await this.sendQuery({ sql, params: [] });
   }
 
-  private async sendQuery(
-    sql: string,
-    compiled: CompiledQuery,
-  ): Promise<QueryRows> {
+  private async sendQuery(compiled: CompiledQuery): Promise<QueryRows> {
     const { request, promise } = await this.openRequest(compiled);
 
     try {
-      this.writeSimpleQuery(sql);
+      if (compiled.params.length === 0) {
+        this.writeSimpleQuery(compiled.sql);
+      } else {
+        this.writeExtendedQuery(compiled);
+      }
+
       return await promise;
     } catch (error) {
       if (this.currentRequest === request) {
@@ -610,6 +610,85 @@ class PostgresClient implements PostgresExecutor {
     this.writeMessage('Q', Buffer.from(`${sql}\0`, UTF8));
   }
 
+  private writeExtendedQuery(compiled: CompiledQuery): void {
+    const params = compiled.params.map((value) => encodePostgresParameter(value));
+    this.writeParseMessage(compiled.sql);
+    this.writeBindMessage(params);
+    this.writeExecuteMessage();
+    this.writeSyncMessage();
+  }
+
+  private writeParseMessage(sql: string): void {
+    const statementName = Buffer.from([0]);
+    const sqlBytes = Buffer.from(`${sql}\0`, UTF8);
+    const payload = Buffer.alloc(statementName.length + sqlBytes.length + 2);
+
+    statementName.copy(payload, 0);
+    sqlBytes.copy(payload, statementName.length);
+    payload.writeInt16BE(0, statementName.length + sqlBytes.length);
+
+    this.writeMessage('P', payload);
+  }
+
+  private writeBindMessage(params: readonly (Buffer | null)[]): void {
+    const portalName = Buffer.from([0]);
+    const statementName = Buffer.from([0]);
+    const formatCodesCount = 1;
+    const resultFormatCodesCount = 0;
+    const paramsLength = params.reduce((total, value) => total + 4 + (value?.length ?? 0), 0);
+    const payload = Buffer.alloc(
+      portalName.length
+      + statementName.length
+      + 2
+      + 2
+      + 2
+      + paramsLength
+      + 2,
+    );
+
+    let offset = 0;
+    portalName.copy(payload, offset);
+    offset += portalName.length;
+    statementName.copy(payload, offset);
+    offset += statementName.length;
+    payload.writeInt16BE(formatCodesCount, offset);
+    offset += 2;
+    payload.writeInt16BE(0, offset);
+    offset += 2;
+    payload.writeInt16BE(params.length, offset);
+    offset += 2;
+
+    for (const value of params) {
+      if (value === null) {
+        payload.writeInt32BE(-1, offset);
+        offset += 4;
+        continue;
+      }
+
+      payload.writeInt32BE(value.length, offset);
+      offset += 4;
+      value.copy(payload, offset);
+      offset += value.length;
+    }
+
+    payload.writeInt16BE(resultFormatCodesCount, offset);
+    this.writeMessage('B', payload);
+  }
+
+  private writeExecuteMessage(): void {
+    const portalName = Buffer.from([0]);
+    const payload = Buffer.alloc(portalName.length + 4);
+
+    portalName.copy(payload, 0);
+    payload.writeInt32BE(0, portalName.length);
+
+    this.writeMessage('E', payload);
+  }
+
+  private writeSyncMessage(): void {
+    this.writeMessage('S', Buffer.alloc(0));
+  }
+
   private writeMessage(type: string, payload: Buffer): void {
     const socket = this.socket;
     if (socket === null) {
@@ -942,22 +1021,9 @@ function ensurePassword(password: string | undefined): string {
   return password;
 }
 
-function substituteParams(sql: string, params: readonly unknown[]): string {
-  return sql.replace(/\$(\d+)/g, (_match, placeholder) => {
-    const index = Number(placeholder) - 1;
-    const value = params[index];
-
-    if (index < 0 || index >= params.length) {
-      throw new RangeError(`missing value for PostgreSQL parameter $${placeholder}`);
-    }
-
-    return serializePostgresValue(value);
-  });
-}
-
-function serializePostgresValue(value: unknown): string {
+function encodePostgresParameter(value: unknown): Buffer | null {
   if (value === null) {
-    return 'NULL';
+    return null;
   }
 
   if (value === undefined) {
@@ -965,7 +1031,67 @@ function serializePostgresValue(value: unknown): string {
   }
 
   if (typeof value === 'string') {
-    return quoteStringLiteral(value);
+    return encodeUtf8(ensurePostgresTextValue(value));
+  }
+
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new RangeError('cannot serialise non-finite numbers as PostgreSQL parameters');
+    }
+
+    return encodeUtf8(String(value));
+  }
+
+  if (typeof value === 'bigint') {
+    return encodeUtf8(String(value));
+  }
+
+  if (typeof value === 'boolean') {
+    return encodeUtf8(value ? 'true' : 'false');
+  }
+
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) {
+      throw new RangeError('cannot serialise invalid Date values as PostgreSQL parameters');
+    }
+
+    return encodeUtf8(value.toISOString());
+  }
+
+  if (Buffer.isBuffer(value)) {
+    return encodeUtf8(`\\x${Buffer.from(value).toString('hex')}`);
+  }
+
+  if (value instanceof Uint8Array) {
+    return encodeUtf8(`\\x${Buffer.from(value).toString('hex')}`);
+  }
+
+  if (Array.isArray(value)) {
+    return encodeUtf8(renderPostgresArrayLiteral(value));
+  }
+
+  if (isPlainObject(value)) {
+    return encodeUtf8(renderJsonValue(value));
+  }
+
+  throw new TypeError(`unsupported PostgreSQL parameter type: ${typeof value}`);
+}
+
+function renderPostgresArrayLiteral(values: readonly unknown[]): string {
+  return `{${values.map((value) => renderPostgresArrayElement(value)).join(',')}}`;
+}
+
+function renderPostgresArrayElement(value: unknown): string {
+  if (value === null) {
+    return 'NULL';
+  }
+
+  if (Array.isArray(value)) {
+    return renderPostgresArrayLiteral(value);
+  }
+
+  if (typeof value === 'string') {
+    return quotePostgresArrayString(value);
   }
 
   if (typeof value === 'number') {
@@ -981,7 +1107,7 @@ function serializePostgresValue(value: unknown): string {
   }
 
   if (typeof value === 'boolean') {
-    return value ? 'TRUE' : 'FALSE';
+    return value ? 'true' : 'false';
   }
 
   if (value instanceof Date) {
@@ -989,32 +1115,61 @@ function serializePostgresValue(value: unknown): string {
       throw new RangeError('cannot serialise invalid Date values as PostgreSQL parameters');
     }
 
-    return `${quoteStringLiteral(value.toISOString())}::timestamptz`;
+    return quotePostgresArrayString(value.toISOString());
   }
 
   if (Buffer.isBuffer(value)) {
-    return `E'\\\\x${(value as any).toString('hex')}'::bytea`;
+    return quotePostgresArrayString(`\\x${Buffer.from(value).toString('hex')}`);
   }
 
   if (value instanceof Uint8Array) {
-    return `E'\\\\x${Buffer.from(value).toString('hex')}'::bytea`;
+    return quotePostgresArrayString(`\\x${Buffer.from(value).toString('hex')}`);
   }
 
-  if (Array.isArray(value)) {
-    if (value.length === 0) {
-      throw new TypeError('cannot serialise empty arrays as PostgreSQL parameters');
-    }
-
-    return `ARRAY[${value.map((entry) => serializePostgresValue(entry)).join(', ')}]`;
+  if (isPlainObject(value)) {
+    return quotePostgresArrayString(renderJsonValue(value));
   }
 
-  throw new TypeError(`unsupported PostgreSQL parameter type: ${typeof value}`);
+  if (value === undefined) {
+    throw new TypeError('cannot serialise undefined as a PostgreSQL parameter');
+  }
+
+  throw new TypeError(`unsupported PostgreSQL array parameter type: ${typeof value}`);
 }
 
-function quoteStringLiteral(text: string): string {
-  if (text.includes('\0')) {
-    throw new TypeError('PostgreSQL string literals cannot contain NUL bytes');
+function quotePostgresArrayString(value: string): string {
+  return `"${ensurePostgresTextValue(value)
+    .replaceAll('\\', '\\\\')
+    .replaceAll('"', '\\"')}"`;
+}
+
+function renderJsonValue(value: Record<string, unknown>): string {
+  const json = JSON.stringify(value);
+
+  if (json === undefined) {
+    throw new TypeError('cannot serialise the provided object as JSON');
   }
 
-  return `E'${text.replaceAll('\\', '\\\\').replaceAll("'", "''")}'`;
+  return ensurePostgresTextValue(json);
+}
+
+function ensurePostgresTextValue(value: string): string {
+  if (value.includes('\0')) {
+    throw new TypeError('PostgreSQL text parameters cannot contain NUL bytes');
+  }
+
+  return value;
+}
+
+function encodeUtf8(value: string): Buffer {
+  return Buffer.from(value, UTF8);
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }

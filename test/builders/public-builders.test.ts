@@ -10,6 +10,8 @@ import {
   orderItem,
   parameter,
   selectQuery,
+  type CompiledQuery,
+  type QueryRows,
   updateQuery,
 } from '../../src/index.js';
 
@@ -41,6 +43,26 @@ function assertThrows(messagePart: string, fn: () => void): void {
   }
 
   assert(thrown, `expected function to throw "${messagePart}"`);
+}
+
+async function assertRejects(
+  fn: () => Promise<unknown>,
+  messagePart: string,
+): Promise<void> {
+  let rejected = false;
+
+  try {
+    await fn();
+  } catch (error) {
+    rejected = true;
+    assert(error instanceof Error, 'expected an Error to be thrown');
+    assert(
+      error.message.includes(messagePart),
+      `expected "${error.message}" to include "${messagePart}"`,
+    );
+  }
+
+  assert(rejected, `expected promise to reject with "${messagePart}"`);
 }
 
 const db = createDatabase();
@@ -214,4 +236,100 @@ assertEqual(
     returningColumns: [column('id')],
   })),
   'delete builder should compile where clauses and returning columns',
+);
+
+const executedQueries: Array<{
+  readonly scope: 'root' | 'transaction';
+  readonly sql: string;
+  readonly params: readonly unknown[];
+}> = [];
+
+const executingDb = createDatabase({
+  async query(compiled: CompiledQuery): Promise<QueryRows> {
+    executedQueries.push({
+      scope: 'root',
+      sql: compiled.sql,
+      params: compiled.params,
+    });
+
+    return [{ ok: true }];
+  },
+  async transaction<T>(
+    callback: (
+      executor: {
+        readonly query: (compiled: CompiledQuery) => Promise<QueryRows>;
+        readonly transaction?: never;
+      },
+    ) => Promise<T> | T,
+  ) {
+    return await callback({
+      async query(compiled: CompiledQuery): Promise<QueryRows> {
+        executedQueries.push({
+          scope: 'transaction',
+          sql: compiled.sql,
+          params: compiled.params,
+        });
+
+        return [];
+      },
+    });
+  },
+});
+
+assertEqual(
+  await executingDb.execute('SELECT $1 AS value', [`O'Reilly -- still literal`]),
+  [{ ok: true }],
+  'execute should forward raw SQL rows through the configured executor',
+);
+
+assertEqual(
+  executedQueries[0],
+  {
+    scope: 'root',
+    sql: 'SELECT $1 AS value',
+    params: [`O'Reilly -- still literal`],
+  },
+  'execute should preserve raw SQL text and params',
+);
+
+const compiledSelect = db
+  .selectFrom('users')
+  .select('id')
+  .where(comparison(column('email'), 'equals', parameter('ada@example.com')))
+  .compile();
+
+await executingDb.execute(compiledSelect);
+
+assertEqual(
+  executedQueries[1],
+  {
+    scope: 'root',
+    sql: compiledSelect.sql,
+    params: compiledSelect.params,
+  },
+  'execute should accept a precompiled query object',
+);
+
+await executingDb.transaction(async (tx) => {
+  await tx.execute('SELECT $1::int AS value', [1]);
+});
+
+assertEqual(
+  executedQueries[2],
+  {
+    scope: 'transaction',
+    sql: 'SELECT $1::int AS value',
+    params: [1],
+  },
+  'execute should remain available inside transactions',
+);
+
+await assertRejects(
+  () => createDatabase().execute('SELECT 1'),
+  'no PostgreSQL executor configured',
+);
+
+await assertRejects(
+  () => executingDb.execute('   '),
+  'sql must be a non-empty string',
 );

@@ -1,4 +1,5 @@
 import { compileQuery, type CompiledQuery } from '../compiler/index.js';
+import { normalizeCompiledQueryInput } from '../db/query-input.js';
 import {
   assignment,
   column,
@@ -689,6 +690,8 @@ export function createDatabase<
     ) => Promise<T>;
   },
 ): {
+  execute(compiled: CompiledQuery): Promise<QueryRows>;
+  execute(sql: string, params?: readonly unknown[]): Promise<QueryRows>;
   selectFrom<Table extends TableName<Schema>>(
     table: Table,
   ): SelectStartBuilder<Schema, Table>;
@@ -714,6 +717,12 @@ export function createDatabase<
   };
 
   return freezeObject({
+    execute(
+      compiledOrSql: CompiledQuery | string,
+      params?: readonly unknown[],
+    ): Promise<QueryRows> {
+      return context.execute('raw', normalizeCompiledQueryInput(compiledOrSql, params));
+    },
     selectFrom<Table extends TableName<Schema>>(
       table: Table,
     ): SelectStartBuilder<Schema, Table> {
